@@ -89,7 +89,7 @@ A separate chat model knows how to build the JSON and call the tool.
   * Use only placeholders from the template (e.g. `"Title 1"`, `"Content Placeholder 2"`).
   * Bullets separated by `\n`.
   * Don’t write into Date/Footer/Slide Number placeholders.
-  * Text only, no images.
+  * Text only, no images. !!!YET!!!
 
 ---
 
