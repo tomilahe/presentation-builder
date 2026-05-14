@@ -1,17 +1,41 @@
-# Presentation builder for Icosagen
+# Presentation Generation Tool
 
-This project generates PowerPoint presentations from a JSON slide schema and a PowerPoint template.
+![Python](https://img.shields.io/badge/Python-3.11+-blue)
+![Open WebUI](https://img.shields.io/badge/Open%20WebUI-tool-orange)
 
-There are two ways to use it:
+This repository contains the source code for the presentation generation tool developed as part of the bachelor's thesis *"Design and Implementation of a Presentation Generation Pipeline Using Large Language Models"* (University of Tartu, Institute of Computer Science, 2026).
 
-1. **OpenWebUI tool** – main way for normal users.
-2. **Local (Python)** – for development / debugging.
+The tool integrates into Icosagen's self-hosted Open WebUI + Ollama infrastructure and generates `.pptx` presentations from natural-language prompts using a planning -> rendering workflow driven by a large language model.
 
----
+## Table of Contents
 
-## Slide JSON schema
+- [Features](#-features)
+- [How It Works](#-how-it-works)
+- [Requirements](#-requirements)
+- [Installation](#-installation)
+- [Usage](#-usage)
+- [Citation](#-citation)
 
-All decks use the same structure:
+## Features
+
+- **Two-phase workflow** - the model first proposes a slide outline based on the template, then renders the presentation after the user confirms.
+- **Template-driven rendering** — uses Icosagen's existing PowerPoint templates, preserving corporate branding and typography without per-slide styling.
+- **Local-only** — runs entirely inside the Open WebUI + Ollama container. Data is not sent to external services.
+- **Document and prompt input** — generates presentations from a text prompt, an attached document, or a combination of both.
+- **Chart and table support** — produces native PowerPoint charts and tables.
+- **Multi-template** — users can switch between available templates from a dropdown in the chat UI.
+
+
+## How It Works
+
+The tool exposes two methods to the LLM through Open WebUI:
+
+1. **`get_template_manifest()`** inspects the active template and returns slide dimensions, available layouts, placeholder indices and types, and supported chart types. The model uses this to plan an outline.
+2. **`render_presentation(spec)`** takes a validated `PresentationSpec` (a structured slide specification) and produces a `.pptx` file. The model calls this only after the user confirms the outline.
+
+### Slide specification
+
+Each slide is defined by a layout index, a set of placeholder keys mapped to text, and optionally a chart or a table:
 
 ```json
 {
@@ -19,99 +43,70 @@ All decks use the same structure:
     {
       "layout": 0,
       "placeholders": {
-        "Title 1": "My Title",
-        "Subtitle 2": "My subtitle"
+        "title": "Quarterly results",
+        "subtitle": "Q4 2025"
+      }
+    },
+    {
+      "layout": 5,
+      "placeholders": {
+        "title": "Revenue by region"
+      },
+      "chart": {
+        "chart_type": "column",
+        "categories": ["EU", "US", "APAC"],
+        "series": {"Revenue (M€)": [12.4, 8.1, 4.7]}
       }
     }
   ]
 }
 ```
 
-* `slides`: non-empty list of slides.
-* Each slide:
+Placeholder keys may be:
+- **Semantic**: `title`, `subtitle`, `body`, `body2`, `body3` (resolved by placeholder type)
+- **Explicit**: a placeholder index as a string (e.g. `"13"`)
 
-  * `layout`: integer index of a layout in the PPTX template.
-  * `placeholders`: `{ "<placeholder name>": "<text or \n-separated bullets>" }`
-* Bullets = one string with items separated by `\n`.
+Bullet points within a single placeholder are separated by `\n`. The full schema is defined by the Pydantic models in `tool.py` (`PresentationSpec`, `SlideSpec`, `ChartSpec`, `TableSpec`).
 
-Examples (must match the template):
+## Requirements
 
-* Layout 0 (Title slide): `"Title 1"`, `"Subtitle 2"`
-* Layout 1 (Title + content): `"Title 1"`, `"Content Placeholder 2"`
-* Layout 2 (Section header): `"Title 1"`, `"Text Placeholder 2"`
+**Runtime environment:**
+- Python 3.11 or later
+- Open WebUI
+- Ollama with at least one tool-capable model installed
 
-See `prompt.json` for a fuller example.
+**Python libraries:**
+- `python-pptx`
+- `pydantic`
 
----
+Both are bundled with Open WebUI's standard Docker image;
 
-## OpenWebUI: tool + model
+**Template:**
+- A valid `.pptx` file in the directory configured by `TEMPLATES_DIR` (default: `/app/backend/data/templates`).
 
-### Tool (`tool_openwebui.py`)
+## Installation
 
-* Exposes `create_presentation(slides)` to OpenWebUI.
-* Does **only** JSON → PPTX:
+The tool is deployed as an Open WebUI tool, not run as a standalone script.
 
-  * loads `icosagen-template.pptx`,
-  * fills placeholders,
-  * saves `presentation_YYYYMMDD_HHMMSS.pptx` into `STATIC_DIR`,
-  * returns a `file_url` in a `GenerationResult`.
+1. Open the Open WebUI workspace as an administrator and navigate to **Workspace → Tools**.
+2. Click **+** to create a new tool and paste the contents of `tool.py`.
+3. Save the tool. It will appear in the tool list as *Presentation generating tool*.
+4. Place a `.pptx` template into the directory configured by the `TEMPLATES_DIR` valve.
+5. Configure the `STATIC_DIR` and `STATIC_URL` valves so generated files are written to a directory served publicly by Open WebUI's static file route.
+6. Create a model in **Workspace → Models** that uses the system prompt from `system_prompt.txt` and enable the tool for it.
 
-**Valves:**
+### Valve configuration
 
-* `STATIC_DIR`: where files are written inside the container
-  e.g. `/app/static`
-* `STATIC_URL`: public base URL mapping to that directory
-  e.g. `https://icosagenai.hpc.ut.ee/static/`
-* `template_path`: absolute path to the PPTX template
-  e.g. `/app/backend/data/icosagen-template.pptx`
+| Valve | Scope | Description |
+|---|---|---|
+| `STATIC_DIR` | Admin | Filesystem path inside the container where generated `.pptx` files are written. |
+| `STATIC_URL` | Admin | Public base URL mapping to `STATIC_DIR`, used to construct download links. |
+| `TEMPLATES_DIR` | Admin | Directory containing `.pptx` template files. |
+| `template` | User | The active template, selected via dropdown in the chat UI. |
 
-### Model in OpenWebUI
+## Usage
 
-A separate chat model knows how to build the JSON and call the tool.
-
-* Name: `Presentation Generator`
-* Base model: `gemma3:27b`
-* Tool enabled: `create_presentation`
-
-**System prompt behavior (short):**
-
-* When the user asks for a *presentation/slides/deck*:
-
-  1. Build a `slides` object with the previously shown shape:
-  2. Call `create_presentation(slides=...)`.
-  3. After the tool result:
-
-     * If `status == "ok"` → reply: `Your presentation is ready: <file_url>`.
-     * If `status == "error"` → show the error message.
-
-* Placeholder rules:
-
-  * Use only placeholders from the template (e.g. `"Title 1"`, `"Content Placeholder 2"`).
-  * Bullets separated by `\n`.
-  * Don’t write into Date/Footer/Slide Number placeholders.
-  * Text only, no images. !!!YET!!!
-
----
-
-## Local usage (dev)
-
-For quick testing without OpenWebUI:
-1. Check and install needed dependencies
-2. Requires `.pptx` template in project root folder
-3. Write a small script that imports the JSON → PPTX logic from `tool_local.py` and calls it with a manual `slides` dict, e.g.:
-
-   ```python
-   slides = {
-       "slides": [
-           {
-               "layout": 0,
-               "placeholders": {
-                   "Title 1": "Local Test Deck",
-                   "Subtitle 2": "Manual JSON"
-               }
-           }
-       ]
-   }
-   ```
-
-4. Run the script and open the generated `.pptx` to check layouts and placeholders.
+1. Start a new chat using the *Presentation Generator* model.
+2. Provide a prompt describing the desired presentation (optionally attaching documents).
+3. Review the outline the tool proposes and confirm or request changes.
+4. Download the generated `.pptx` via the link returned by the tool.
