@@ -1,18 +1,14 @@
 """
 title: Presentation generating tool
 author: Tomi Lahe
-description: Fetches existing PowerPoint templates and use them to generate presentations.
+description: Loads PowerPoint templates and generates presentations from structured specs.
 version: 1.0.0
 licence: MIT
 """
 
-from __future__ import annotations
-import copy
-import io
+import json
 import os
 import uuid
-import urllib.request
-import json
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
@@ -60,7 +56,7 @@ _PH_TYPE_LABELS: Dict[int, str] = {
 
 
 # ---------------------------------------------------------------------------
-# Schemas
+# Pydantic models
 # ---------------------------------------------------------------------------
 
 
@@ -78,25 +74,16 @@ class ChartSpec(BaseModel):
 
 
 class TableSpec(BaseModel):
-    # Row-major: first row is the header when has_header is True.
-    # All rows must have the same number of columns.
-    # Example: [["Name","Q1","Q2"],["Alpha",10,20],["Beta",15,18]]
     data: List[List[str]]
     has_header: bool = True
     left: float = 0.7
     top: float = 1.6
     width: float = 11.9
-    # Optional explicit column widths in inches. Must have the same length as
-    # the number of columns and sum to <= width. If omitted the renderer
-    # distributes columns evenly.
     col_widths: Optional[List[float]] = None
 
 
 class SlideSpec(BaseModel):
     layout: int
-    # Keys: "title", "subtitle", "body"/"body1", "body2", "body3"
-    # OR exact ph_idx as a string: "0", "1", "13", etc.
-    # Separate bullet points with "\n".
     placeholders: Dict[str, str] = Field(default_factory=dict)
     chart: Optional[ChartSpec] = None
     table: Optional[TableSpec] = None
@@ -114,14 +101,13 @@ class PresentationSpec(BaseModel):
 class Tools:
 
     class Valves(BaseModel):
-        # Admin-only — infrastructure paths configured in the Tools admin panel
+        # Output directory, public base URL for downloads, and template search path.
         STATIC_DIR: str = "/app/backend/open_webui/static/presentations"
         STATIC_URL: str = "https://thesis-test.duckdns.org/static/presentations"
         TEMPLATES_DIR: str = "/app/backend/data/templates"
-        UPLOADS_DIR: str = "/app/backend/data/uploads"
 
     class UserValves(BaseModel):
-        # Per-user — shown in the Valves panel in the chat UI
+        # Request-scoped settings (e.g. which template file to open).
         template: str = Field(
             default="icosagen_standard",
             description="Presentation template to use.",
@@ -135,8 +121,8 @@ class Tools:
 
         @classmethod
         def get_template_options(cls, __user__=None) -> list[dict]:
-            """Scan the templates directory and return available .pptx files as dropdown options."""
-            templates_dir = "/app/backend/data/templates"
+            """List .pptx templates under Valves.TEMPLATES_DIR as value/label pairs."""
+            templates_dir = Tools.Valves().TEMPLATES_DIR
             if not os.path.isdir(templates_dir):
                 return [{"value": "icosagen_standard", "label": "icosagen_standard"}]
             options = [
@@ -159,16 +145,17 @@ class Tools:
         os.makedirs(self.valves.STATIC_DIR, exist_ok=True)
 
     # -----------------------------------------------------------------------
-    # Helper — resolve template path from user valves
+    # Template path
     # -----------------------------------------------------------------------
 
     def _get_template_path(self, __user__: Optional[dict]) -> str:
+        """Absolute path to the template .pptx (Valves.TEMPLATES_DIR + user template)."""
         user_valves = (__user__ or {}).get("valves")
         template_name = getattr(user_valves, "template", "icosagen_standard")
         return os.path.join(self.valves.TEMPLATES_DIR, f"{template_name}.pptx")
 
     # -----------------------------------------------------------------------
-    # Tool 1 — Template Manifest
+    # Template manifest
     # -----------------------------------------------------------------------
 
     async def get_template_manifest(
@@ -176,9 +163,9 @@ class Tools:
         __user__: Optional[dict] = None,
     ) -> Dict[str, Any]:
         """
-        Call this first whenever the user wants to create a presentation.
-        Returns available slide layouts and placeholder details so you can
-        plan which layout fits each slide.
+        Inspect the active template and return slide dimensions, layout indices,
+        placeholder indices and types, and supported chart types for building a
+        PresentationSpec.
         """
         template_path = self._get_template_path(__user__)
 
@@ -252,14 +239,10 @@ class Tools:
             "num_layouts": len(layouts),
             "layouts": layouts,
             "supported_chart_types": sorted(_CHART_TYPE_MAP.keys()),
-            "next_step": (
-                "Present a plain-language slide outline to the user and ask for "
-                "confirmation before calling render_presentation."
-            ),
         }
 
     # -----------------------------------------------------------------------
-    # Tool 3 — Render Presentation
+    # Render presentation
     # -----------------------------------------------------------------------
 
     async def render_presentation(
@@ -276,23 +259,9 @@ class Tools:
         produced from get_template_manifest. Never call this in the same
         turn as get_template_manifest.
 
-        If this returns errors, fix the spec and call this function again
-        directly — do not call get_template_manifest again unless the user
-        wants to start over.
-
-        Workflow
-        ────────
-        1. get_template_manifest()  — learn layouts, present outline to user
-        2. User confirms outline    — next conversation turn
-        3. render_presentation()    — build the full spec from your outline
-                                      and render it
-
-        SlideSpec fields
-        ────────────────
-        layout       : int  — layout index from the manifest
-        placeholders : dict — placeholder key → text content
-        chart        : ChartSpec  — optional chart (mutually exclusive with table)
-        table        : TableSpec  — optional table (mutually exclusive with chart)
+        Each slide uses SlideSpec.layout (manifest layout index), placeholders
+        (keys resolved to placeholder indices), and optionally chart or table.
+        If both chart and table are present on a slide, only the chart is drawn.
         """
 
         async def emit_status(
@@ -312,21 +281,20 @@ class Tools:
                     {"type": "notification", "data": {"type": level, "content": msg}}
                 )
 
-        # --- Validation ---
+        # Validation
         await emit_status("Validating spec...")
         try:
             if isinstance(spec, str):
                 spec = json.loads(spec)
             parsed = PresentationSpec.model_validate(spec)
         except Exception as exc:
-
             return {
                 "status": "error",
                 "message": f"Schema error: {exc}",
                 "file_url": None,
             }
 
-        # --- Template ---
+        # Template
         await emit_status("Loading template...")
         template_path = self._get_template_path(__user__)
         if not os.path.exists(template_path):
@@ -338,13 +306,12 @@ class Tools:
             }
 
         prs = PPTXPresentation(template_path)
-        template_name = os.path.splitext(os.path.basename(template_path))[0]
 
-        # --- Layout introspection ---
+        # Layout introspection
         max_li = len(prs.slide_layouts) - 1
         ph_maps = self._get_layout_ph_maps(prs)
 
-        # --- Normalisation ---
+        # Normalisation
         norm_slides, errors, warnings = self._normalize_spec(parsed, ph_maps, max_li)
 
         if errors:
@@ -356,13 +323,12 @@ class Tools:
                 "file_url": None,
             }
 
-        # --- Rendering ---
+        # Rendering
         total = len(norm_slides)
         await emit_status(f"Rendering {total} slide(s)...")
 
         for i, sd in enumerate(norm_slides, start=1):
             layout_idx = sd["layout"]
-            layout_name = prs.slide_layouts[layout_idx].name
 
             slide = prs.slides.add_slide(prs.slide_layouts[layout_idx])
 
@@ -379,14 +345,11 @@ class Tools:
                 if str(idx) not in populated and hasattr(shape, "text_frame"):
                     shape.text_frame.clear()
             if sd.get("chart"):
-                chart_type = sd["chart"].get("chart_type", "chart")
                 self._add_chart(slide, ChartSpec(**sd["chart"]))
 
             if sd.get("table"):
-                rows = len(sd["table"].get("data", []))
                 self._add_table(slide, TableSpec(**sd["table"]))
 
-        # --- Save ---
         await emit_status("Saving presentation...")
         filename = f"{filename_prefix}_{uuid.uuid4().hex[:8]}.pptx"
         out_path = os.path.join(self.valves.STATIC_DIR, filename)
@@ -413,7 +376,7 @@ class Tools:
         return result
 
     # -----------------------------------------------------------------------
-    # Private helpers — normalization
+    # Helper for normalization
     # -----------------------------------------------------------------------
 
     def _normalize_spec(
@@ -455,7 +418,7 @@ class Tools:
                     )
                 resolved[str(ph_idx)] = str(value)
 
-            # ---- chart validation ----
+            # chart validation
             norm_chart = None
             if slide.chart:
                 c = slide.chart
@@ -487,7 +450,7 @@ class Tools:
                             )
                         norm_chart = c.model_dump()
 
-            # ---- table validation ----
+            # table validation
             norm_table = None
             if slide.table:
                 t = slide.table
@@ -544,7 +507,7 @@ class Tools:
         return norm_slides, errors, warnings
 
     # -----------------------------------------------------------------------
-    # Private helpers — layout introspection
+    # Helper functions for layout introspection
     # -----------------------------------------------------------------------
 
     def _get_layout_ph_maps(self, prs) -> Dict[int, Dict[int, Dict]]:
@@ -618,6 +581,9 @@ class Tools:
     def _fill_placeholders(
         self, ph_shape_map: Dict[int, Any], placeholders: Dict[str, str]
     ) -> None:
+        """Fill numeric-index placeholders from text.
+        Newlines become paragraphs.
+        """
         for key, value in placeholders.items():
             if not key.isdigit():
                 continue
@@ -637,6 +603,9 @@ class Tools:
     # -----------------------------------------------------------------------
 
     def _add_chart(self, slide, spec: ChartSpec) -> None:
+        """Insert a chart from ChartSpec.
+        Skip if chart_type is unsupported.
+        """
         chart_type = _CHART_TYPE_MAP.get(spec.chart_type)
         if not chart_type:
             return
@@ -678,13 +647,11 @@ class Tools:
 
     def _add_table(self, slide, spec: TableSpec) -> None:
         """
-        Add a table to a slide from a TableSpec.
-
-        The first row is styled as a header (bold, filled) when has_header
-        is True. Column widths are distributed evenly unless col_widths is
-        provided. All cells inherit the template theme font via the table's
-        default style — no explicit font is set here so the template controls
-        the look.
+        Insert a native PowerPoint table from TableSpec.
+        When has_header is True, the first row uses bold text; other rows are
+        plain. Column widths default to an even split of spec.width, or use
+        col_widths when set. Cell fonts follow the template table style (no
+        explicit font is applied here).
         """
         if not spec.data:
             return
@@ -700,7 +667,7 @@ class Tools:
             col_widths_emu = [Inches(col_w)] * cols
 
         # python-pptx requires a total width and height for add_table;
-        # height is estimated at 0.4 inches per row as a sensible default —
+        # height is estimated at 0.4 inches per row as a sensible default
         # PowerPoint will expand rows to fit content automatically.
         row_height = Inches(0.4)
         total_height = row_height * rows
@@ -719,7 +686,7 @@ class Tools:
         for ci, width_emu in enumerate(col_widths_emu):
             table.columns[ci].width = width_emu
 
-        # Fill cell text. Header row gets bold runs; body rows are plain.
+        # Fill cell text. Header row gets bold runs, body rows are plain.
         for ri, row_data in enumerate(spec.data):
             is_header = spec.has_header and ri == 0
             for ci, cell_text in enumerate(row_data):
