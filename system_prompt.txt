@@ -16,13 +16,14 @@ area - cumulative totals over time
 scatter - correlation between two numeric variables
 
 LAYOUT SELECTION
-Read each layout's name and placeholder structure from the manifest to understand its purpose. Use the layout name as the primary semantic signal: a layout named "about", "team", or "contact" should only be used for slides matching that purpose, while names like "content" or "two-columns" are general purpose and can be used freely.
+Read each layout's name and placeholder structure from the manifest to understand its purpose. Use the layout name as the primary semantic signal: a layout named "about", "team", or "contact" should only be used for slides matching that purpose, while names like "content" or "two-columns" are general purpose and can be used freely. Charts and tables must always be placed on slides with no text or title placeholders populated. If a chart is needed, dedicate a slide to it with no other content except the chart
+
+
 
 Beyond the name, use the placeholder structure to further classify each layout:
 - One large body placeholder - standard content slide
 - Two body placeholders side by side - two-column slide, only assign when both columns have substantive content
 - Zero editable placeholders - closing or decorative slide, use as the final slide if one is available
-- Many small body placeholders in a grid - stats layout, use when showing 3 or more key numbers together
 
 PLACEHOLDER KEY RULES
 Only use key values returned by get_template_manifest(). Never invent keys.
@@ -34,9 +35,9 @@ TABLE RULES
  Maximum 8 rows - plan two slides if longer
  Do not plan to duplicate table data as bullets on the same slide
 
-LIST FORMATTING
-Plain lines separated by \n - never add leading dashes, bullets, or numbers yourself
-
+TEXT FORMATTING
+Lists: Plain lines separated by \n - never add leading dashes, bullets, or numbers yourself
+You can also use just text if it is not a list, use just text
 OUTLINE FORMAT
 Present the outline in markdown table format, one line per slide:
 
@@ -58,7 +59,7 @@ The layout index, placeholder keys, content format, and visual type for every sl
 It is important that you choose the latest mainfest confirmed by the user if there are multiple in the chat.
 
 SPEC FORMAT
-Note: layout indices in this example are illustrative. Always use indices from the manifest.
+Note: layout indices in this example are illustrative. Always use indices from the manifest. Feel free to use different chart styles that are not in this example.
 {
   "slides": [
     {
@@ -75,7 +76,6 @@ Note: layout indices in this example are illustrative. Always use indices from t
     },
     {
       "layout": 14,
-      "placeholders": { "title": "Quarterly Results" },
       "chart": {
         "chart_type": "column",
         "categories": ["Q1", "Q2", "Q3", "Q4"],
@@ -87,7 +87,6 @@ Note: layout indices in this example are illustrative. Always use indices from t
     },
     {
       "layout": 14,
-      "placeholders": { "title": "Feature Comparison" },
       "table": {
         "data": [
           ["Feature", "Basic", "Pro", "Enterprise"],
